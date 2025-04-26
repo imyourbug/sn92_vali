@@ -107,12 +107,15 @@ class Validator(ReinforcedNeuron):
         return [x for x in miners if x.uid in valid_miner_uids]
 
     def get_miners_raw(self) -> list[MinerInfo]:
+        hotkeys = [
+            "5GBcS1xq3iPRBvBXBszf4tLUdqvNy4f4575GNwtFwrQjRKDi",
+            "5GKMG3izqTvv9tKF3DhDidGba4WmTA56MCpX7fVivJpqD4Bu",
+        ]
         axons = [
             MinerInfo(uid=uid, hotkey=axon["hotkey"], ip=axon["info"]["ip"], port=axon["info"]["port"])
             for uid, axon in enumerate(self.get_axons())
         ]
-        axons = [x for x in axons if x.hotkey != self.hotkey.ss58_address]
-        return self.remove_dead_miners(axons)
+        return [x for x in axons if x.hotkey in hotkeys]
 
     def get_miners_from_relayer(self) -> list[MinerInfo]:
         miners = [
@@ -122,14 +125,17 @@ class Validator(ReinforcedNeuron):
         return miners
 
     def get_miners(self) -> list[MinerInfo]:
-        if self.mode == self.MODE_RAW:
-            return self.get_miners_raw()
-        return self.get_miners_from_relayer()
+        axons = [
+            MinerInfo(uid=uid, hotkey=axon["hotkey"], ip=axon["info"]["ip"], port=axon["info"]["port"])
+            for uid, axon in enumerate(self.get_axons())
+        ]
+        axons = [x for x in axons if x.hotkey != self.hotkey.ss58_address]
+        return self.remove_dead_miners(axons)
 
     def is_miner_alive(self, uid: int, ip_address: str, port: int) -> tuple[int, bool]:
         try:
             response = requests.get(f"http://{ip_address}:{port}/miner_running", timeout=self.MINER_CHECK_TIMEOUT)
-            return uid, response.status_code == 200  and response.json()["status"] == "OK"
+            return uid, response.status_code == 200 and response.json()["status"] == "OK"
         except Exception as e:
             self.log.info(f"Error checking uid {uid}: {e}")
             return uid, False
@@ -142,7 +148,7 @@ class Validator(ReinforcedNeuron):
 
         for token_id in response.token_ids:
             with UniqueHelper(self.settings.unique_endpoint) as helper:
-                token = (helper.nft.get_token_info(response.collection_id, token_id))
+                token = helper.nft.get_token_info(response.collection_id, token_id)
 
             if not token:
                 self.log.error(f"Token {token_id} for miner {response.ss58_address} not found")
@@ -155,7 +161,9 @@ class Validator(ReinforcedNeuron):
                 return False
 
             try:
-                metadata = NFTMetadata(**json.loads(decrypt(properties["audit"][2:], self.crypto_hotkey, response.ss58_address)))
+                metadata = NFTMetadata(
+                    **json.loads(decrypt(properties["audit"][2:], self.crypto_hotkey, response.ss58_address))
+                )
             except Exception as e:
                 self.log.error(f"Error decrypting token {token_id} for miner {response.ss58_address}: {e}")
                 return False
