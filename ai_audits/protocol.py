@@ -8,8 +8,14 @@ from pydantic import (
 )
 
 __all__ = [
-    "VulnerabilityReport", "ValidatorTask", "KnownVulnerability", "SmartContract", "TaskType",
-    "ContractTask", "MinerInfo", "NFTMetadata"
+    "VulnerabilityReport",
+    "ValidatorTask",
+    "KnownVulnerability",
+    "SmartContract",
+    "TaskType",
+    "ContractTask",
+    "MinerInfo",
+    "NFTMetadata",
 ]
 
 from solidity_audit_lib.messaging import VulnerabilityReport, AuditBase, ContractTask
@@ -65,8 +71,12 @@ class TaskType(StrEnum):
 
 
 class ValidatorTask(AuditBase):
-    contract_code: str = Field(..., title="Contract code", description="Code of vulnerable contract")
-    task_type: str | None = Field(default=None, title="Task type", description="Type of validator task")
+    contract_code: str = Field(
+        ..., title="Contract code", description="Code of vulnerable contract"
+    )
+    task_type: str | None = Field(
+        default=None, title="Task type", description="Type of validator task"
+    )
 
 
 class MinerInfo(BaseModel):

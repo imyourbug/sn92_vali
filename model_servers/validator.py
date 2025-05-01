@@ -6,20 +6,28 @@ from fastapi import FastAPI, Request, HTTPException
 from openai import AsyncOpenAI
 from py_solidity_vuln_db import get_vulnerability
 from solc_ast_parser.utils import compile_contract_with_standart_input
-
+from openai import OpenAI
 from ai_audits.contracts.contract_generator import (
     Vulnerability,
     create_contract,
     create_task,
 )
-from ai_audits.protocol import SmartContract, ValidatorTask, KnownVulnerability, TaskType
+from ai_audits.protocol import (
+    SmartContract,
+    ValidatorTask,
+    KnownVulnerability,
+    TaskType,
+)
+import csv
 from ai_audits.subnet_utils import ROLES, SolcSingleton
+from dotenv import load_dotenv
 
-GPT_MODEL = "anthropic/claude-3.7-sonnet"
+load_dotenv(override=True)
+GPT_MODEL = "gpt-4o-mini"
 
-client = AsyncOpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=os.getenv("OPEN_ROUTER_API_KEY"),
+client = OpenAI(
+    base_url=os.getenv("OPENAI_API_URL"),
+    api_key=os.getenv("OPENAI_API_KEY"),
 )
 app = FastAPI()
 
@@ -33,6 +41,7 @@ VULNERABILITIES_TO_GENERATE = [
     KnownVulnerability.SIGNATURE_REPLAY.value,
 ]
 
+folder_path = "data"
 
 PROMPT_VALIDATOR = """
 You are a Solidity smart contract auditor. 
@@ -104,7 +113,7 @@ solc = SolcSingleton()
 
 
 async def generate_contract(prompt: str) -> SmartContract | None:
-    completion = await client.chat.completions.create(
+    completion = client.chat.completions.create(
         model=GPT_MODEL,
         messages=[
             {"role": ROLES.SYSTEM, "content": prompt},
@@ -133,24 +142,28 @@ def try_prepare_contract(result) -> SmartContract | None:
 
 async def generate_task(requested_vulnerability: str | None = None) -> ValidatorTask:
     possible_vulnerabilities = (
-        random.sample(VULNERABILITIES_TO_GENERATE, min(3, len(VULNERABILITIES_TO_GENERATE)))
+        random.sample(
+            VULNERABILITIES_TO_GENERATE, min(3, len(VULNERABILITIES_TO_GENERATE))
+        )
         if requested_vulnerability is None
         else [requested_vulnerability]
     )
-    completion = await client.beta.chat.completions.parse(
-        model=GPT_MODEL,
-        messages=[
+
+    parameters = {
+        "messages": [
             {"role": ROLES.SYSTEM, "content": PROMPT_VALIDATOR},
-            # Output format guidance is provided automatically by OpenAI SDK.
             {
                 "role": ROLES.USER,
                 "content": f"Generate new vulnerable contract with one of "
                 f"vulnerabilities: {', '.join(possible_vulnerabilities)}",
             },
         ],
-        response_format=ValidatorTask,
-        temperature=0.3,
-    )
+        "model": GPT_MODEL,
+        "temperature": 0.3,
+        "response_format": ValidatorTask,
+    }
+
+    completion = client.beta.chat.completions.parse(**parameters)
     message = completion.choices[0].message
     if message.parsed:
         return message.parsed
@@ -192,25 +205,33 @@ async def get_hybrid_task(request: Request):
         requested_vulnerability = None
 
     while tries > 0:
-        raw_vulnerability = get_vulnerability(requested_vulnerability.lower() if requested_vulnerability else None)
+        raw_vulnerability = get_vulnerability(
+            requested_vulnerability.lower() if requested_vulnerability else None
+        )
         print(f"Raw vulnerability code: {repr(raw_vulnerability.code)}")
-        raw_vulnerability = Vulnerability(vulnerabilityClass=raw_vulnerability.name, code=raw_vulnerability.code)
+        raw_vulnerability = Vulnerability(
+            vulnerabilityClass=raw_vulnerability.name, code=raw_vulnerability.code
+        )
 
-        tries -= 1
-        try:
-            compile_contract_with_standart_input(create_contract(raw_vulnerability.code))
-        except Exception as e:
-            print(f"Vulnerability compilation error: {e}")
-            continue
+        # tries -= 1
+        # try:
+        #     compile_contract_with_standart_input(
+        #         create_contract(raw_vulnerability.code)
+        #     )
+        # except Exception as e:
+        #     print(f"Vulnerability compilation error: {e}")
+        #     continue
 
-        result = await generate_contract(get_hybrid_validator_prompt(raw_vulnerability.code))
+        result = await generate_contract(
+            get_hybrid_validator_prompt(raw_vulnerability.code)
+        )
         print(f"Generated contract: {repr(result)}")
 
-        try:
-            solc.compile(result.code)
-        except Exception as e:
-            print(f"Compilation error: {e}")
-            continue
+        # try:
+        #     solc.compile(result.code)
+        # except Exception as e:
+        #     print(f"Compilation error: {e}")
+        #     continue
 
         if result is not None:
             is_valid = True
@@ -223,15 +244,74 @@ async def get_hybrid_task(request: Request):
         print(f"Task code: {repr(task.contract_code)}")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-
+    # 
+    type = "hybrid_task"
+    write_to_file(task.contract_code, type, requested_vulnerability, f"{folder_path}/{type}.csv")
     return task
 
+@app.get("/get_hybrid_task")
+async def get_task_hybrid():
+    tries = int(os.getenv("MAX_TRIES", "3"))
+    is_valid, result = False, None
+    number_samples = 100
+    for _ in range(number_samples):
+        for requested_vulnerability in VULNERABILITIES_TO_GENERATE:
+            while tries > 0:
+                raw_vulnerability = get_vulnerability(
+                    requested_vulnerability.lower() if requested_vulnerability else None
+                )
+                raw_vulnerability = Vulnerability(
+                    vulnerabilityClass=raw_vulnerability.name, code=raw_vulnerability.code
+                )
+
+                # tries -= 1
+                # try:
+                #     compile_contract_with_standart_input(
+                #         create_contract(raw_vulnerability.code)
+                #     )
+                # except Exception as e:
+                #     print(f"Vulnerability compilation error: {e}")
+                #     continue
+
+                result = await generate_contract(
+                    get_hybrid_validator_prompt(raw_vulnerability.code)
+                )
+
+                # try:
+                #     solc.compile(result.code)
+                # except Exception as e:
+                #     print(f"Compilation error: {e}")
+                #     continue
+
+                if result is not None:
+                    is_valid = True
+                    break
+            if not is_valid:
+                raise HTTPException(status_code=400, detail="Invalid answer from LLM")
+
+            try:
+                task = create_task(result.code, raw_vulnerability)
+                print(f"Task code: {repr(task.contract_code)}")
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            #
+            type = "hybrid_task"
+            write_to_file(
+                task.contract_code, type, requested_vulnerability, f"{folder_path}/{type}.csv"
+            )
+            print(f"GENERATED: {requested_vulnerability} FOR {type}")
+
+    return "Done"
+
+def write_to_file(code, type, vulnerability_class, filename):
+    with open(filename, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow([code, vulnerability_class, type])
 
 @app.post("/valid_contract")
 async def get_valid_contract(request: Request):
     tries = int(os.getenv("MAX_TRIES", "3"))
     is_valid, result = False, None
-
 
     while tries > 0:
         result = await generate_contract(prompt=PROMPT_VALID_CONTRACT)

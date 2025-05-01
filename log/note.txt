@@ -1,0 +1,24 @@
+HYBRID = "hybrid_task"
+- VULNERABILITIES_TO_GENERATE = [
+    KnownVulnerability.REENTRANCY.value,
+    KnownVulnerability.GAS_GRIEFING.value,
+    KnownVulnerability.BAD_RANDOMNESS.value,
+    KnownVulnerability.FORCED_RECEPTION.value,
+    KnownVulnerability.UNGUARDED_FUNCTION.value,
+    KnownVulnerability.SIGNATURE_REPLAY.value,
+]
+LLM = "task"
+- VULNERABILITIES_TO_GENERATE = [
+    KnownVulnerability.REENTRANCY.value,
+    KnownVulnerability.GAS_GRIEFING.value,
+    KnownVulnerability.BAD_RANDOMNESS.value,
+    KnownVulnerability.FORCED_RECEPTION.value,
+    KnownVulnerability.UNGUARDED_FUNCTION.value,
+    KnownVulnerability.SIGNATURE_REPLAY.value,
+]
+
+RANDOM_TEXT = "random_task"
+- vulnerability_class="Invalid code",
+
+VALID_CONTRACT = "valid_contract"
+- vulnerability_class="Valid contract"

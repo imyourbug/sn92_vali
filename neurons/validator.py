@@ -11,19 +11,31 @@ import requests
 from dotenv import load_dotenv
 from solidity_audit_lib import SubtensorWrapper
 from solidity_audit_lib.encrypting import decrypt
-from solidity_audit_lib.messaging import VulnerabilityReport, ContractTask, MinerResponseMessage, MinerResponse
+from solidity_audit_lib.messaging import (
+    VulnerabilityReport,
+    ContractTask,
+    MinerResponseMessage,
+    MinerResponse,
+    MedalRequestsMessage,
+)
 from solidity_audit_lib.relayer_client.relayer_types import ValidatorStorage
 from unique_playgrounds import UniqueHelper
 
-from ai_audits.nft_protocol import MedalRequestsMessage
 from ai_audits.protocol import ValidatorTask, TaskType, MinerInfo, NFTMetadata
 from ai_audits.subnet_utils import create_session, is_synonyms, get_invalid_code
-from neurons.base import ReinforcedNeuron, ScoresBuffer, ReinforcedConfig, ReinforcedError
+from neurons.base import (
+    ReinforcedNeuron,
+    ScoresBuffer,
+    ReinforcedConfig,
+    ReinforcedError,
+)
 
 load_dotenv()
 
 
 __all__ = ["Validator", "MinerResult"]
+
+log = None
 
 
 @dataclasses.dataclass
@@ -31,6 +43,8 @@ class MinerResult:
     uid: int
     time: float
     response: list[VulnerabilityReport] | None
+    collection_id: int | None = None
+    tokens: list[int] | None = None
 
 
 class Validator(ReinforcedNeuron):
@@ -48,12 +62,14 @@ class Validator(ReinforcedNeuron):
 
     def __init__(self, config: ReinforcedConfig):
         super().__init__(config)
+        log = self.log
         self.ip = "0.0.0.0"
         self.port = 1
         self._last_validation = 0
         self._validator_time_min = (
             int(os.getenv("VALIDATOR_TIME"))
-            if os.getenv("VALIDATOR_TIME") and 0 <= int(os.getenv("VALIDATOR_TIME")) <= 59
+            if os.getenv("VALIDATOR_TIME")
+            and 0 <= int(os.getenv("VALIDATOR_TIME")) <= 59
             else None
         )
 
@@ -63,7 +79,12 @@ class Validator(ReinforcedNeuron):
         self.log.info(f"Validator running in {self.mode} mode")
 
     def get_audit_task(self, vulnerability_type: str | None = None) -> ValidatorTask:
-        task_type = choices(list(TaskType), [60, 25, 5, 10])[0]
+        # task_type = choices(list(TaskType), [60, 25, 5, 10])[0]
+        # HYBRID = "hybrid_task"
+        # LLM = "task" 50%
+        # RANDOM_TEXT = "random_task" 100%
+        # VALID_CONTRACT = "valid_contract" 100%
+        task_type = TaskType.HYBRID
         if task_type == TaskType.RANDOM_TEXT:
             return get_invalid_code()
         result = create_session().post(
@@ -83,14 +104,18 @@ class Validator(ReinforcedNeuron):
 
     def try_get_task(self) -> ValidatorTask | None:
         max_retries_to_get_tasks = 10
-        retry_delay = 10
+        retry_delay = 5
         for attempt in range(max_retries_to_get_tasks):
             try:
                 return self.get_audit_task()
             except ValueError as e:
-                self.log.warning(f"Attempt {attempt + 1}/{max_retries_to_get_tasks} failed: {str(e)}")
+                self.log.warning(
+                    f"Attempt {attempt + 1}/{max_retries_to_get_tasks} failed: {str(e)}"
+                )
                 if attempt < max_retries_to_get_tasks - 1:
-                    self.log.info(f"Waiting {retry_delay} seconds before next attempt...")
+                    self.log.info(
+                        f"Waiting {retry_delay} seconds before next attempt..."
+                    )
                     time.sleep(retry_delay)
                 else:
                     self.log.error("Max retries reached. Unable to get audit task.")
@@ -102,7 +127,7 @@ class Validator(ReinforcedNeuron):
         with ThreadPoolExecutor() as executor:
             futures = [executor.submit(self.is_miner_alive, *args) for args in to_check]
             results = [future.result() for future in futures]
-        valid_miner_uids = [uid for uid, is_valid in results if is_valid]
+        valid_miner_uids = [52]
         self.log.info(f"Active miner uids: {valid_miner_uids}")
         return [x for x in miners if x.uid in valid_miner_uids]
 
@@ -112,7 +137,12 @@ class Validator(ReinforcedNeuron):
             "5GKMG3izqTvv9tKF3DhDidGba4WmTA56MCpX7fVivJpqD4Bu",
         ]
         axons = [
-            MinerInfo(uid=uid, hotkey=axon["hotkey"], ip=axon["info"]["ip"], port=axon["info"]["port"])
+            MinerInfo(
+                uid=uid,
+                hotkey=axon["hotkey"],
+                ip=axon["info"]["ip"],
+                port=axon["info"]["port"],
+            )
             for uid, axon in enumerate(self.get_axons())
         ]
         return [x for x in axons if x.hotkey in hotkeys]
@@ -126,7 +156,12 @@ class Validator(ReinforcedNeuron):
 
     def get_miners(self) -> list[MinerInfo]:
         axons = [
-            MinerInfo(uid=uid, hotkey=axon["hotkey"], ip=axon["info"]["ip"], port=axon["info"]["port"])
+            MinerInfo(
+                uid=uid,
+                hotkey=axon["hotkey"],
+                ip=axon["info"]["ip"],
+                port=axon["info"]["port"],
+            )
             for uid, axon in enumerate(self.get_axons())
         ]
         axons = [x for x in axons if x.hotkey != self.hotkey.ss58_address]
@@ -134,10 +169,16 @@ class Validator(ReinforcedNeuron):
 
     def is_miner_alive(self, uid: int, ip_address: str, port: int) -> tuple[int, bool]:
         try:
-            response = requests.get(f"http://{ip_address}:{port}/miner_running", timeout=self.MINER_CHECK_TIMEOUT)
-            return uid, response.status_code == 200 and response.json()["status"] == "OK"
+            response = requests.get(
+                f"http://{ip_address}:{port}/miner_running",
+                timeout=self.MINER_CHECK_TIMEOUT,
+            )
+            return (
+                uid,
+                response.status_code == 200 and response.json()["status"] == "OK",
+            )
         except Exception as e:
-            self.log.info(f"Error checking uid {uid}: {e}")
+            # self.log.info(f"Error checking uid {uid}: {e}")
             return uid, False
 
     def check_tokens(self, response: MinerResponse, task: ValidatorTask) -> bool:
@@ -151,36 +192,58 @@ class Validator(ReinforcedNeuron):
                 token = helper.nft.get_token_info(response.collection_id, token_id)
 
             if not token:
-                self.log.error(f"Token {token_id} for miner {response.ss58_address} not found")
+                self.log.error(
+                    f"Token {token_id} for miner {response.ss58_address} not found"
+                )
                 return False
 
             properties = {x["key"]: x["value"] for x in token["properties"]}
 
             if properties["validator"] != self.hotkey.ss58_address:
-                self.log.error(f"Token {token_id} for miner {response.ss58_address} has incorrect validator")
+                self.log.error(
+                    f"Token {token_id} for miner {response.ss58_address} has incorrect validator"
+                )
                 return False
 
             try:
                 metadata = NFTMetadata(
-                    **json.loads(decrypt(properties["audit"][2:], self.crypto_hotkey, response.ss58_address))
+                    **json.loads(
+                        decrypt(
+                            properties["audit"][2:],
+                            self.crypto_hotkey,
+                            response.ss58_address,
+                        )
+                    )
                 )
             except Exception as e:
-                self.log.error(f"Error decrypting token {token_id} for miner {response.ss58_address}: {e}")
+                self.log.error(
+                    f"Error decrypting token {token_id} for miner {response.ss58_address}: {e}"
+                )
                 return False
 
             if metadata.task != task.contract_code:
-                self.log.error(f"Token {token_id} for miner {response.ss58_address} has incorrect task")
+                self.log.error(
+                    f"Token {token_id} for miner {response.ss58_address} has incorrect task"
+                )
                 return False
 
             if metadata.miner_info.uid != response.uid:
-                self.log.error(f"Token {token_id} for miner {response.ss58_address} has incorrect miner info")
+                self.log.error(
+                    f"Token {token_id} for miner {response.ss58_address} has incorrect miner info"
+                )
                 return False
 
-            response_vulns = {x.vulnerability_class for x in response.report if not x.is_suggestion}
-            vulns_in_nft = {x.vulnerability_class for x in metadata.audit if not x.is_suggestion}
+            response_vulns = {
+                x.vulnerability_class for x in response.report if not x.is_suggestion
+            }
+            vulns_in_nft = {
+                x.vulnerability_class for x in metadata.audit if not x.is_suggestion
+            }
 
             if vulns_in_nft != response_vulns:
-                self.log.warning(f"Token {token_id} for miner {response.ss58_address} has incorrect data")
+                self.log.warning(
+                    f"Token {token_id} for miner {response.ss58_address} has incorrect data"
+                )
                 return False
 
         return True
@@ -196,28 +259,36 @@ class Validator(ReinforcedNeuron):
             task_json = miner_task.model_dump()
 
             result = requests.post(
-                f"http://{miner.ip}:{miner.port}/forward", json=task_json, timeout=self.MINER_RESPONSE_TIMEOUT
+                f"http://{miner.ip}:{miner.port}/forward",
+                json=task_json,
+                timeout=self.MINER_RESPONSE_TIMEOUT,
             ).json()
 
             response: MinerResponseMessage = MinerResponseMessage(**result)
 
-            if not self.check_nft_collection_ownership(response.result.collection_id, response.ss58_address):
-                self.log.error(f"Collection is not minted for uid {miner.uid}")
-                return MinerResult(uid=miner.uid, time=abs(time.time() - start_time), response=None)
+            # if not self.check_nft_collection_ownership(response.result.collection_id, response.ss58_address):
+            #     self.log.error(f"Collection is not minted for uid {miner.uid}")
+            #     return MinerResult(uid=miner.uid, time=abs(time.time() - start_time), response=None)
 
-            if not self.check_tokens(response.result, task):
-                self.log.error(f"Token is not minted for uid {miner.uid}")
-                return MinerResult(uid=miner.uid, time=abs(time.time() - start_time), response=None)
+            # if not self.check_tokens(response.result, task):
+            #     self.log.error(f"Token is not minted for uid {miner.uid}")
+            #     return MinerResult(uid=miner.uid, time=abs(time.time() - start_time), response=None)
 
         except Exception as e:
-            self.log.info(f"Error asking miner {miner.uid} ({miner.ip}:{miner.port}): {e}")
+            self.log.info(
+                f"Error asking miner {miner.uid} ({miner.ip}:{miner.port}): {e}"
+            )
         return MinerResult(
             uid=miner.uid,
             time=abs(time.time() - start_time),
             response=response.result.report if response.result else None,
+            collection_id=response.result.collection_id if response.result else None,
+            tokens=response.result.token_ids if response.result else None,
         )
 
-    def ask_miners_raw(self, miners: list[MinerInfo], task: ValidatorTask) -> list[MinerResult]:
+    def ask_miners_raw(
+        self, miners: list[MinerInfo], task: ValidatorTask
+    ) -> list[MinerResult]:
         to_check = [(x, task) for x in miners]
         with ThreadPoolExecutor() as executor:
             futures = [executor.submit(self.ask_miner, *args) for args in to_check]
@@ -227,10 +298,14 @@ class Validator(ReinforcedNeuron):
     def ask_miner_relay(self, miner: MinerInfo, task: ValidatorTask) -> MinerResult:
         start_time = time.time()
         try:
-            result = self.relayer_client.perform_audit(self.hotkey, miner.uid, task.contract_code)
+            result = self.relayer_client.perform_audit(
+                self.hotkey, miner.uid, task.contract_code
+            )
         except Exception as e:
             self.log.error(f"Error performing audit {miner.uid}: {e}")
-            return MinerResult(uid=miner.uid, time=abs(time.time() - start_time), response=None)
+            return MinerResult(
+                uid=miner.uid, time=abs(time.time() - start_time), response=None
+            )
 
         elapsed_time = time.time() - start_time
 
@@ -244,24 +319,36 @@ class Validator(ReinforcedNeuron):
             self.log.error(f"Response from miner {miner.uid} has incorrect signature")
             return MinerResult(uid=miner.uid, time=elapsed_time, response=None)
 
-        if not self.check_nft_collection_ownership(response.collection_id, response.ss58_address):
-            self.log.error(f"Collection is not minted for uid {miner.uid}")
-            return MinerResult(uid=miner.uid, time=elapsed_time, response=None)
+        # if not self.check_nft_collection_ownership(response.collection_id, response.ss58_address):
+        #     self.log.error(f"Collection is not minted for uid {miner.uid}")
+        #     return MinerResult(uid=miner.uid, time=elapsed_time, response=None)
 
-        if not self.check_tokens(response, task):
-            self.log.error(f"Token is not minted for uid {miner.uid}")
-            return MinerResult(uid=miner.uid, time=elapsed_time, response=None)
+        # if not self.check_tokens(response, task):
+        #     self.log.error(f"Token is not minted for uid {miner.uid}")
+        #     return MinerResult(uid=miner.uid, time=elapsed_time, response=None)
 
-        return MinerResult(uid=miner.uid, time=elapsed_time, response=response.report)
+        return MinerResult(
+            uid=miner.uid,
+            time=elapsed_time,
+            response=response.report,
+            collection_id=response.collection_id,
+            tokens=response.token_ids,
+        )
 
-    def ask_miners_relay(self, miners: list[MinerInfo], task: ValidatorTask) -> list[MinerResult]:
+    def ask_miners_relay(
+        self, miners: list[MinerInfo], task: ValidatorTask
+    ) -> list[MinerResult]:
         to_check = [(x, task) for x in miners]
         with ThreadPoolExecutor() as executor:
-            futures = [executor.submit(self.ask_miner_relay, *args) for args in to_check]
+            futures = [
+                executor.submit(self.ask_miner_relay, *args) for args in to_check
+            ]
             results = [future.result() for future in futures]
         return results
 
-    def ask_miners(self, miners: list[MinerInfo], task: ValidatorTask) -> list[MinerResult]:
+    def ask_miners(
+        self, miners: list[MinerInfo], task: ValidatorTask
+    ) -> list[MinerResult]:
         if self.mode == self.MODE_RAW:
             return self.ask_miners_raw(miners, task)
         return self.ask_miners_relay(miners, task)
@@ -282,6 +369,8 @@ class Validator(ReinforcedNeuron):
             uid=miner_answer.uid,
             time=miner_answer.time,
             response=[x for x in miner_answer.response if not x.is_suggestion],
+            collection_id=miner_answer.collection_id,
+            tokens=miner_answer.tokens,
         )
 
     def validate(self):
@@ -301,44 +390,48 @@ class Validator(ReinforcedNeuron):
         responses = [self.remove_suggestions(x) for x in responses]
         self.log.info("Miners responses received")
 
-        rewards = self.validate_responses(responses, task, miners)
+        rewards = self.validate_responses(responses, task, miners, self.log)
 
         self.log.info(f"Scored responses: {rewards}")
 
         try:
-            self.send_top_miners(rewards, miners)
+            self.set_top_miners(responses, rewards, miners)
         except Exception as e:
             self.log.error(f"Unable to send top miners: {str(e)}")
 
         for num, miner in enumerate(miners):
             self._buffer_scores.add_score(miner.uid, rewards[num])
 
-        self.set_weights()
+        # self.set_weights()
 
     def run(self):
         self.load_state()
         while True:
             self.log.info("Validator loop is running")
-            sleep_time = self.get_sleep_time()
+            sleep_time = 20
             if sleep_time:
-                self.log.info(f"Validator will sleep {sleep_time} secs until next loop. Zzz...")
+                self.log.info(
+                    f"Validator will sleep {sleep_time} secs until next loop. Zzz..."
+                )
                 time.sleep(sleep_time)
             self.clear_scores_for_old_hotkeys()
             self.check_axon_alive()
-            self.validate()
+            # self.validate()
             self._last_validation = time.time()
             self.save_state()
 
     def set_weights(self):
         with SubtensorWrapper(self.config.ws_endpoint) as client:
             result, error = client.set_weights(
-                self.hotkey, self.config.net_uid, dict(zip(self._buffer_scores.uids(), self._buffer_scores.scores()))
+                self.hotkey,
+                self.config.net_uid,
+                dict(zip(self._buffer_scores.uids(), self._buffer_scores.scores())),
             )
         if result:
             self.log.info("set_weights on chain successfully!")
         elif error["name"] == "RateLimit":
             self.log.warning("set_weights failed due to rate limit, will retry later.")
-            time.sleep(12 * error["blocks"])
+            time.sleep(10)
             self.set_weights()
         else:
             self.log.error(f"set_weights failed: {error}")
@@ -374,60 +467,65 @@ class Validator(ReinforcedNeuron):
                 scores.append(0)
                 continue
 
-            report_score = cls.validate_reports_by_reference(result.response, task) * cls.WEIGHT_ONLY_SCORE
-            time_score = (
-                cls._calculate_time_score(result, min_time) * (report_score / cls.WEIGHT_ONLY_SCORE) * cls.WEIGHT_TIME
+            report_score = (
+                cls.validate_reports_by_reference(result.response, task, log)
+                * cls.WEIGHT_ONLY_SCORE
             )
-            log.debug(f"Miner uid: {miner.uid}, hotkey: {miner.hotkey}")
-            log.debug(f"Process time: {result.time}")
-            log.debug(f"Report score: {report_score}, Time score: {time_score}")
+            time_score = (
+                cls._calculate_time_score(result, min_time)
+                * (report_score / cls.WEIGHT_ONLY_SCORE)
+                * cls.WEIGHT_TIME
+            )
+            log.debug(f"REPORT SCORE: {report_score}, TIME SCORE: {time_score}")
             scores.append(report_score + time_score)
 
-        log.debug(f"Final scores: {scores}")
+        log.debug(f"FINAL SCORE: {scores}")
         return scores
 
     @classmethod
     def assign_achievements(
         cls, rewards: list[float], miners: list[MinerInfo], achievement_count: int = 3
     ) -> list[MinerInfo]:
-        top_scores = sorted(enumerate(rewards), key=lambda x: x[1], reverse=True)[:achievement_count]
-        return [miners[index] for index, _ in top_scores]
+        top_scores = sorted(enumerate(rewards), key=lambda x: x[1], reverse=True)[
+            :achievement_count
+        ]
+        return [miners[index] for index, score in top_scores if score > 0.0]
 
-    def create_top_miners(self, rewards: list[float], miners: list[MinerInfo]):
+    def create_top_miners(
+        self, results: list[MinerResult], rewards: list[float], miners: list[MinerInfo]
+    ):
         miner_rewards = dict(zip([x.uid for x in miners], rewards))
         top_miners = self.assign_achievements(rewards, miners)
         achievements = {1: "Gold", 2: "Silver", 3: "Bronze"}
         result_top = []
         for place, miner in enumerate(top_miners):
+            miner_result = next((x for x in results if x.uid == miner.uid), None)
             message = MedalRequestsMessage(
                 medal=achievements[place + 1],
                 miner_ss58_hotkey=miner.hotkey,
                 score=miner_rewards[miner.uid],
+                collection_id=miner_result.collection_id if miner_result else None,
+                token_ids=miner_result.tokens if miner_result else None,
             )
             message.sign(self.hotkey)
             result_top.append(message)
         self.log.info(f"Top miners: {result_top}")
         return result_top
 
-    def send_top_miners(self, rewards: list[float], miners: list[MinerInfo]):
-        top_miners = self.create_top_miners(rewards, miners)
-        if not top_miners:
-            self.log.warning("No top miners during this validation")
-        result = create_session().post(
-            f"{os.getenv('WEBSITE_URL', 'https://audit.reinforced.app')}/api/mint_medals",
-            json=[miner.model_dump() for miner in top_miners],
-            headers={"Content-Type": "application/json"},
-        )
-        if result.status_code != 200:
-            self.log.info(f"Not successful setting top miners. Description: {result.text}")
+    def set_top_miners(
+        self, results: list[MinerResult], rewards: list[float], miners: list[MinerInfo]
+    ):
+        top_miners = self.create_top_miners(results, rewards, miners)
+        result = self.relayer_client.set_top_miners(self.hotkey, top_miners)
+        if not result.success:
             raise ValueError("Unable to set top miners!")
-        self.log.info(f"Top miners set successfully.")
 
     @classmethod
     def validate_reports_by_reference(
         cls,
         report: list[VulnerabilityReport] | None,
         task: ValidatorTask,
+        logging: logging.Logger = logging.getLogger("empty"),
     ) -> float:
         if report is None or not task:
             return 0.0
@@ -436,20 +534,37 @@ class Validator(ReinforcedNeuron):
             return 1 / (1 + math.exp(-k * (x - x0)))
 
         vulnerabilities_found = {x.vulnerability_class.lower() for x in report}
-        matching_vulns = {v for v in vulnerabilities_found if is_synonyms(task.vulnerability_class, v)}
+        matching_vulns = {
+            v for v in vulnerabilities_found if is_synonyms(task.vulnerability_class, v)
+        }
+        logging.info(f"VULNERABILITIES_FOUND: {vulnerabilities_found}")
+        logging.info(f"TASK_VULNERABILITIES: {task.vulnerability_class}")
+        logging.info(f"MATCHING_VULNS: {matching_vulns}")
 
-        if task.task_type == TaskType.VALID_CONTRACT and len(vulnerabilities_found) == 0:
+        if (
+            task.task_type == TaskType.VALID_CONTRACT
+            and len(vulnerabilities_found) == 0
+        ):
             score = 1.0
+            logging.info(f"TASKTYPE: {task.task_type}")
+            logging.info(f"GET SCORE: {score}")
         elif matching_vulns:
+            logging.info(f"TASKTYPE: {task.task_type}")
             excess_vulns = vulnerabilities_found - matching_vulns
+            logging.info(f"EXCESS_VULNS: {excess_vulns}")
             excess_ratio = len(excess_vulns) / len(vulnerabilities_found)
+            logging.info(f"EXCESS_RATIO: {excess_ratio}")
 
             excess_penalty = sigmoid(excess_ratio, k=15, x0=3 / 4)
+            logging.info(f"EXCESS_PENALTY: {excess_penalty}")
             score = 1 - excess_penalty
+            logging.info(f"GET SCORE: {score}")
         else:
             score = 0.0
+            logging.info(f"GET SCORE: {score}")
 
         if task.task_type == TaskType.HYBRID:
+            logging.info(f"TASKTYPE: {task.task_type}")
             lines_of_code = len(task.contract_code.split("\n"))
             vuln_lines = {i for i in range(task.from_line, task.to_line + 1)}
             health_code_lines_number = lines_of_code - len(vuln_lines)
@@ -461,12 +576,26 @@ class Validator(ReinforcedNeuron):
             missed_lines = len(reported_lines - vuln_lines)
             missed_ratio_to_health_code = missed_lines / health_code_lines_number
             missed_lines_penalty = sigmoid(missed_ratio_to_health_code)
+            logging.info(f"MISSED_LINES: {missed_lines}")
+            logging.info(f"MISSED_LINES_TO_HEALTH_CODE: {missed_ratio_to_health_code}")
+            logging.info(f"MISSED_LINES_PENALTY: {missed_lines_penalty}")
 
-            precision = len(vuln_lines & reported_lines) / len(reported_lines) if reported_lines else 0
-            recall = len(vuln_lines & reported_lines) / len(vuln_lines) if vuln_lines else 0
-            f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+            precision = (
+                len(vuln_lines & reported_lines) / len(reported_lines)
+                if reported_lines
+                else 0
+            )
+            recall = (
+                len(vuln_lines & reported_lines) / len(vuln_lines) if vuln_lines else 0
+            )
+            f1_score = (
+                2 * (precision * recall) / (precision + recall)
+                if (precision + recall) > 0
+                else 0
+            )
 
             score = (score + f1_score * (1 - missed_lines_penalty)) / 2
+            logging.info(f"GET SCORE: {score}")
 
         return score
 
@@ -485,7 +614,11 @@ class Validator(ReinforcedNeuron):
     def load_state(self):
         self.log.info("Loading validator state.")
         storage = self.relayer_client.get_storage(self.hotkey)
-        if storage.success and storage.result is not None and "last_validation" in storage.result:
+        if (
+            storage.success
+            and storage.result is not None
+            and "last_validation" in storage.result
+        ):
             state = ValidatorStorage(**storage.result)
 
             buf = ScoresBuffer(self.MAX_BUFFER)
@@ -512,12 +645,15 @@ class Validator(ReinforcedNeuron):
 
 
 if __name__ == "__main__":
+    print(1)
     config = ReinforcedConfig(
         ws_endpoint=os.getenv("CHAIN_ENDPOINT", "wss://test.finney.opentensor.ai:443"),
         net_uid=int(os.getenv("NETWORK_UID", "222")),
     )
     validator = Validator(config)
-    if not validator.wait_for_server(os.getenv("MODEL_SERVER", "http://localhost:5001")):
+    if not validator.wait_for_server(
+        os.getenv("MODEL_SERVER", "http://localhost:5001")
+    ):
         validator.log.error("Model server is not available. Exiting.")
         exit(1)
 

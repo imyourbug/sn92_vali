@@ -4,6 +4,7 @@ import logging
 import os
 import sys
 import time
+
 import requests
 import uvicorn
 from async_substrate_interface.sync_substrate import Keypair
@@ -141,7 +142,7 @@ class ReinforcedNeuron:
         )
 
     def get_settings(self):
-        settings = create_session().get(f'{os.getenv("WEBSITE_URL", "https://audit.reinforced.app")}/api/settings').json()
+        settings = create_session().get('https://audit.reinforced.app/api/settings').json()
         if os.getenv('NETWORK_TYPE'):
             relayer = [x for x in settings['relayers'] if x['network'] == os.getenv('NETWORK_TYPE')][0]
         else:
@@ -222,7 +223,7 @@ class ReinforcedNeuron:
                 ))
                 if not result.success:
                     self.log.warning('Unable to register at relayer, need wait for sync...')
-                    time.sleep(60)
+                    time.sleep(20)
                     continue
                 self.uid = uid
                 self._uid_check_time = time.time()
@@ -233,7 +234,7 @@ class ReinforcedNeuron:
                     self.log.info(f'Axon serving, net uid: {self.config.net_uid}, uid: {uid}, ss58 address: {self.hotkey.ss58_address}')
                     break
                 self.log.warning(f'Unable to perform serve_axon. Need to wait {error["blocks"]} blocks')
-            time.sleep(error['blocks'] * 6)
+            time.sleep(20)
 
     @classmethod
     def serve_uvicorn(cls, app):
@@ -249,5 +250,5 @@ class ReinforcedNeuron:
             except requests.RequestException:
                 pass
             self.log.warning(f"Server is not running yet. Waiting {delay} seconds to connect...")
-            time.sleep(delay)
+            time.sleep(5)
         return False

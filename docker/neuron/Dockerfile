@@ -4,11 +4,13 @@ RUN apt-get update && apt-get install -y git
 WORKDIR /app
 
 COPY requirements.version.txt .
-
 COPY requirements.txt .
 RUN pip install setuptools --upgrade
-
 RUN pip install -r requirements.txt
 
 COPY . /app
 RUN pip install -e .
+
+# Add this line to run validator.py on container startup
+CMD ["python", "neurons/validator.py"]
+# CMD ["python", "generate.py"]
